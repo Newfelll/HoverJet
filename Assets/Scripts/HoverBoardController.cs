@@ -12,6 +12,7 @@ using Debug = UnityEngine.Debug;
 public class HoverBoardController : MonoBehaviour
 {
     [Header("References")]
+    private PIDController hoverPID;
     private Rigidbody rb;
 
     private Transform camTransform;
@@ -74,7 +75,8 @@ public class HoverBoardController : MonoBehaviour
     private float horizontalInput, verticalInput, xAxisTurnInput;
 
     RaycastHit slopeHit;
-    Vector3 slopeNormal;
+    Vector3 slopeNormal; 
+    RaycastHit groundNormal;
     
    
     float xRotation;
@@ -110,9 +112,11 @@ public class HoverBoardController : MonoBehaviour
     private Vector3 moveDirForward;
     private Vector3 moveDirHorizontal;
     public float velocityLerpSpeed;
-    public float breakLerpSpeed;
-    public bool break;    
-
+    [FormerlySerializedAs("breakLerpSpeed")] public float dragLerpSpeed;
+    [FormerlySerializedAs("bbreak")] public bool dragg;
+    private bool breakk;
+    private Vector3 groundTransformForward;
+    private float lastHitDist;
 
     bool OnSLope()
     {   
@@ -134,8 +138,8 @@ public class HoverBoardController : MonoBehaviour
         else return false;
         
     } void Start()
-         {
-            
+    {
+        hoverPID = new PIDController();    
              currentVelocities = new float[hoverPoints.Length];
      
              springParams = new SpringUtils.tDampedSpringMotionParams();
@@ -147,22 +151,19 @@ public class HoverBoardController : MonoBehaviour
     {
         if (verticalInput == 0)
         {
-            break=true;
+            dragg=true;
         }
-        else break=false;
+        else dragg=false;
 
-        
-       
-        
-       
+        breakk= Input.GetKey(KeyCode.Space);
             
         VelocityText.text = "Velocity: " + rb.linearVelocity.magnitude.ToString("F2");
         AngularVelocityText.text= "Angular Velocity: " + rb.angularVelocity.magnitude.ToString("F2");
 
         rb.maxLinearVelocity = maxVelocity;
-
-        isGrounded = Physics.CheckSphere(groundCheckT.position, groundOverlap, groundLayer);
-        onSlope = OnSLope();
+        
+        
+       
 
         PlayerInput();
        
@@ -189,22 +190,31 @@ public class HoverBoardController : MonoBehaviour
 
     private void LateUpdate()
     {
-        Vector3 position = transform.position - (transform.forward * cameraDistance) + Vector3.up * cameraHeight;
+        Vector3 position = transform.position - (transform.forward * cameraDistance) + transform.up * cameraHeight;
         position= new Vector3(position.x,position.y,position.z);
 
        camTransform.position = Vector3.Lerp(camTransform.position,position,Time.deltaTime*cameraFollowSpeed);
       
         camTransform.LookAt(transform.position);
+       
+      
     }
 
     private void FixedUpdate()
-    {   HandleHoverSpring();
+    {   
+        
+        isGrounded = Physics.CheckSphere(groundCheckT.position, groundOverlap, groundLayer);
+        onSlope = OnSLope();
+        
+        
+    //    HandleHoverSpring();
+        PIDHover();
         RedirectVelocityToForward();       // Can use this maybe.
         
         HandleXSmoothing();
         
         Move();
-        TurnHorizontal();
+        TurnHorizontal();       // Maybe make it without force.
         TurnVertical();
 
       
@@ -212,9 +222,51 @@ public class HoverBoardController : MonoBehaviour
        HandleXZRotationConstraint();
        HandleZSmoothing();
 
-
        Break();
+       Drag();
+       ApplyGravityForce();
+       RotationSmoothing();
+
+
+
+
+    }
+    
+   
+    private void PIDHover()
+    {   
         
+        
+        
+       
+     if (isGrounded)
+     {   
+         Debug.DrawRay(groundNormal.point,Vector3.up *5,Color.magenta);
+         
+         
+         //...determine how high off the ground it is...
+         Vector3 normalToPoint = transform.position - groundNormal.point;
+         float height = Vector3.Dot(normalToPoint,groundNormal.normal);
+         //...save the normal of the ground...
+         
+         //...use the PID controller to determine the amount of hover force needed...
+         float forcePercent = hoverPID.Seek(hoverHeight, height);
+		
+         //...calulcate the total amount of hover force based on normal (or "up") of the ground...
+         Vector3 force = groundNormal.normal * (hoverStrength * forcePercent);
+         
+         //...calculate the force and direction of gravity to adhere the ship to the 
+         //track (which is not always straight down in the world)...
+         
+
+         //...and finally apply the hover and gravity forces
+         rb.AddForce(force, ForceMode.Acceleration);
+        
+     }
+    }
+
+    private void RotationSmoothing()
+    {
         if (canSnap)
         {   
             
@@ -227,14 +279,15 @@ public class HoverBoardController : MonoBehaviour
             int rayHitCount = 0;
 
             RaycastHit snapHit;
-            if (Physics.Raycast(front, -snapCheckT.up, out snapHit, groundDistanceForSnap, groundLayer))
+            if (Physics.Raycast(front, -slopeCheckT.up, out snapHit, groundDistanceForSnap, groundLayer))
             {
                 normalSum += snapHit.normal;
                 rayHitCount++;
             }
-            if (Physics.Raycast(back, -snapCheckT.up, out snapHit, groundDistanceForSnap, groundLayer))
+            if (Physics.Raycast(back, -groundCheckT.up, out groundNormal, groundDistanceForSnap, groundLayer))
             {
-                normalSum += snapHit.normal;
+                normalSum += groundNormal.normal;
+                
                 rayHitCount++;
             }
             if (Physics.Raycast(middle, -snapCheckT.up, out snapHit, groundDistanceForSnap, groundLayer))
@@ -246,12 +299,12 @@ public class HoverBoardController : MonoBehaviour
             if (rayHitCount > 0)
             {
                 Vector3 averagedNormal = (normalSum / rayHitCount).normalized;
-                Vector3 target = Vector3.ProjectOnPlane(transform.forward, averagedNormal).normalized;
-                Quaternion targetRotate = Quaternion.LookRotation(target, averagedNormal);
+                groundTransformForward = Vector3.ProjectOnPlane(transform.forward, averagedNormal).normalized;
+                Quaternion targetRotate = Quaternion.LookRotation(groundTransformForward, averagedNormal);
                 rb.rotation = Quaternion.Slerp(rb.rotation, targetRotate, Time.deltaTime * groundSnapSpeed);
-                Debug.DrawRay(transform.position, 10*target, Color.blue);
+                Debug.DrawRay(transform.position, 10*groundTransformForward, Color.blue);
                 Debug.DrawRay(transform.position, 10*averagedNormal, Color.green);
-                Debug.DrawRay(transform.position, 10*transform.forward, Color.blue);
+               
             }
 
           //  RaycastHit snapHit;
@@ -267,21 +320,37 @@ public class HoverBoardController : MonoBehaviour
           //  }
        //
         }
-
-     
-
     }
-
-
-    private void Break()
-    {   if(break)
-        {
-            
+    private void ApplyGravityForce()
+    {
+        if (isGrounded)
+        {   
+            Vector3 gravityForce = -groundNormal.normal * groundGravity;
+            rb.AddForce(gravityForce, ForceMode.Acceleration);
         }
-        float magnitude = rb.velocity.magnitude;
-        rb.linearVelocity=rb.linearVelocity.normalized*(Mathf.Lerp(magnitude, magnitude*0.99f, Time.deltaTime * breakLerpSpeed));
+        else
+        {   Vector3 gravityForce = Vector3.down * (groundGravity/airGravityDivider);
+            rb.AddForce(gravityForce, ForceMode.Acceleration);
+        }
     }
-    
+    private void Drag()
+    {   if(dragg)
+        {
+
+            float magnitude = rb.linearVelocity.magnitude;
+            rb.linearVelocity=rb.linearVelocity.normalized*(Mathf.Lerp(magnitude, magnitude*0.99f, Time.deltaTime * dragLerpSpeed));
+        }
+        
+    }
+    private void Break()
+    {   if(breakk)
+        {
+
+            float magnitude = rb.linearVelocity.magnitude;
+            rb.linearVelocity=rb.linearVelocity.normalized*(Mathf.Lerp(magnitude, magnitude*0.95f, Time.deltaTime * dragLerpSpeed));
+        }
+        
+    }
     private void RedirectVelocityToForward()
     {
         rb.linearVelocity=Vector3.Lerp(rb.linearVelocity.normalized,transform.forward,Time.deltaTime*velocityLerpSpeed)*rb.linearVelocity.magnitude;
@@ -350,8 +419,8 @@ public class HoverBoardController : MonoBehaviour
       
       Vector3 horizontalMoveDirection = upVector.normalized;
 
-        moveDirForward = (transform.forward * verticalInput);
-        moveDirHorizontal = (horizontalMoveDirection * horizontalInput);
+        moveDirForward = (groundTransformForward.normalized * verticalInput);
+        moveDirHorizontal = (groundNormal.normal * horizontalInput);
 
 
     }
@@ -458,7 +527,7 @@ public class HoverBoardController : MonoBehaviour
 
         if (onSlope)
         {
-            rb.AddTorque(slopeNormal * (horizontalInput * horizontalTurnMultiplier * turnSpeed), ForceMode.Acceleration);
+            rb.AddTorque(groundNormal.normal * (horizontalInput * horizontalTurnMultiplier * turnSpeed), ForceMode.Acceleration);
         }
         else
         {
@@ -530,7 +599,9 @@ public class HoverBoardController : MonoBehaviour
         if (Physics.Raycast(hoverPoint.position, -hoverPoint.up, out hit, hoverHeight * 2f, groundLayer))
         {   
             // Get the distance from the hover point to the ground
-            float currentHeight = hit.distance;
+            Vector3 normalToPoint = transform.position - hit.point;
+            float currentHeight = Vector3.Dot(normalToPoint,hit.normal);
+         //   float currentHeight = hit.distance;
 
             // Calculate spring motion parameters based on the hover system
             SpringUtils.CalcDampedSpringMotionParams(
